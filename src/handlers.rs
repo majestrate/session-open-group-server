@@ -559,29 +559,19 @@ pub fn get_messages(
     // record activity sample for statistics
     // let it fail as that isn't a big deal
     {
-        let pubkey = match get_public_key_for_auth_token(auth_token, pool) {
-            Ok(pubkey) => pubkey,
-            Err(_) => None,
-        };
-        match pubkey {
-            Some(pubkey) => {
-                let mut conn = pool.get().map_err(|_| Error::DatabaseFailedInternally)?;
-                let now = chrono::Utc::now().timestamp();
-                let raw_stats_stmt = format!(
-                    "INSERT OR REPLACE INTO {}(public_key, last_active) VALUES(?1, ?2)",
-                    storage::USER_ACTIVITY_TABLE
-                );
-                let tx = conn.transaction().map_err(|_| Error::DatabaseFailedInternally)?;
-                match tx.execute(&raw_stats_stmt, params![pubkey, now]) {
-                    Ok(_) => (),
-                    Err(e) => {
-                        println!("failed to update stats: {}.", e);
-                    }
-                };
-                // Commit
-                tx.commit().map_err(|_| Error::DatabaseFailedInternally)?;
-            }
-            None => {}
+        if let Ok(pubkey) = get_public_key_for_auth_token(auth_token, pool) {
+            let mut conn = pool.get().map_err(|_| Error::DatabaseFailedInternally)?;
+            let now = chrono::Utc::now().timestamp();
+            let raw_stats_stmt = format!(
+                "INSERT OR REPLACE INTO {}(public_key, last_active) VALUES(?1, ?2)",
+                storage::USER_ACTIVITY_TABLE
+            );
+            let tx = conn.transaction().map_err(|_| Error::DatabaseFailedInternally)?;
+            if let Err(err) = tx.execute(&raw_stats_stmt, params![pubkey, now]) {
+                    error!("failed to update stats: {}.", err);
+            };
+            // Commit
+            tx.commit().map_err(|_| Error::DatabaseFailedInternally)?;
         }
     }
     // Return the messages
@@ -1063,15 +1053,9 @@ pub async fn get_stats_for_room(
     room: String, query_map: HashMap<String, i64>,
 ) -> Result<Response, Rejection> {
     let now = chrono::Utc::now().timestamp();
-    let window = match query_map.get("window") {
-        Some(val) => val,
-        None => &3600i64,
-    };
+    let window: i64 = query_map.get("window").cloned().unwrap_or(3600);
 
-    let upperbound = match query_map.get("start") {
-        Some(val) => val,
-        None => &now,
-    };
+    let upperbound = query_map.get("start").cloned().unwrap_or(now);
 
     let lowerbound = upperbound - window;
     let pool = storage::pool_by_room_id(&room);
@@ -1084,12 +1068,9 @@ pub async fn get_stats_for_room(
     let mut query_users =
         conn.prepare(&raw_query_users).map_err(|_| Error::DatabaseFailedInternally)?;
 
-    let active = match query_users
+    let active = query_users
         .query_row(params![lowerbound, upperbound], |row| Ok(row.get::<_, u32>(0)?))
-    {
-        Ok(row) => row,
-        Err(_e) => return Err(warp::reject::custom(Error::DatabaseFailedInternally)),
-    };
+        .map_err(|_| Error::DatabaseFailedInternally)?;
 
     let raw_query_posts = format!(
         "SELECT COUNT(id) FROM {} WHERE timestamp > ?1 AND timestamp <= ?2",
@@ -1099,12 +1080,9 @@ pub async fn get_stats_for_room(
     let mut query_posts =
         conn.prepare(&raw_query_posts).map_err(|_| Error::DatabaseFailedInternally)?;
 
-    let posts = match query_posts
+    let posts = query_posts
         .query_row(params![lowerbound * 1000, upperbound * 1000], |row| Ok(row.get::<_, u32>(0)?))
-    {
-        Ok(row) => row,
-        Err(_e) => return Err(warp::reject::custom(Error::DatabaseFailedInternally)),
-    };
+        .map_err(|_| Error::DatabaseFailedInternally)?;
 
     // Return value
     #[derive(Debug, Deserialize, Serialize)]
